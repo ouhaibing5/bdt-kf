@@ -1,4 +1,5 @@
 import type { LogisticsOrder } from '@/mock/logisticsOrders'
+import type { TicketItem } from '@/types/ticket'
 
 export type ReportSource = '轨迹' | '日志' | '邮件' | '赔付' | '工单'
 
@@ -26,6 +27,12 @@ export interface EvidenceCheck {
   detail: string
 }
 
+/** 报告中的工单举证条目：本单工单 / 同客户其他工单 */
+export interface ReportTicket {
+  ticket: TicketItem
+  relation: '本单工单' | '客户其他工单'
+}
+
 export interface ServiceReport {
   alsNo: string
   generatedAt: string
@@ -38,6 +45,8 @@ export interface ServiceReport {
   evidenceChecks: EvidenceCheck[]
   conclusion: string
   risks: string[]
+  /** 客户工单举证（含同客户其他订单工单） */
+  tickets: ReportTicket[]
 }
 
 /** 历史留存的服务报告（localStorage 持久化） */

@@ -41,6 +41,8 @@ const savedRow = computed(() =>
   savedId.value ? reportStore.getById(savedId.value) : null,
 )
 
+const reportTickets = computed(() => report.value?.tickets || [])
+
 const SOURCE_TAG: Record<
   ReportSource,
   'primary' | 'success' | 'warning' | 'info' | 'danger'
@@ -70,7 +72,7 @@ function onGenerate() {
       alsNo: als,
       emails: emailStore.queryByAls(als),
       compensations: compensationStore.records.filter((r) => r.alsNo === als),
-      tickets: ticketStore.tickets.filter((t) => t.orderNo === als),
+      tickets: ticketStore.tickets,
     })
     loading.value = false
     if (!result) {
@@ -313,6 +315,71 @@ onMounted(() => {
             :closable="false"
             class="risk-alert"
           />
+        </section>
+
+        <section v-if="reportTickets.length" class="ticket-section">
+          <div class="section-title">
+            客户工单举证（{{ reportTickets.length }}）
+            <span class="section-sub"
+              >本单工单 + 按会员名/邮箱匹配的同客户其他订单工单</span
+            >
+          </div>
+          <el-table :data="reportTickets" border stripe size="small">
+            <el-table-column label="关联" width="120">
+              <template #default="{ row }">
+                <el-tag
+                  size="small"
+                  :type="row.relation === '本单工单' ? 'primary' : 'info'"
+                  >{{ row.relation }}</el-tag
+                >
+              </template>
+            </el-table-column>
+            <el-table-column label="工单号" width="160">
+              <template #default="{ row }">{{ row.ticket.caseId }}</template>
+            </el-table-column>
+            <el-table-column label="主题 / 问题" min-width="240">
+              <template #default="{ row }">
+                <div class="ticket-title">
+                  {{ row.ticket.emailTitle || row.ticket.questionInfo || '—' }}
+                </div>
+                <div class="ticket-sub">{{ row.ticket.fromEmail }}</div>
+              </template>
+            </el-table-column>
+            <el-table-column label="关联订单" width="150">
+              <template #default="{ row }">{{
+                row.ticket.orderNo || '—'
+              }}</template>
+            </el-table-column>
+            <el-table-column label="工单状态" width="90">
+              <template #default="{ row }">
+                <el-tag
+                  size="small"
+                  :type="row.ticket.caseStatus === '已完成' ? 'success' : 'primary'"
+                  effect="plain"
+                  >{{ row.ticket.caseStatus }}</el-tag
+                >
+              </template>
+            </el-table-column>
+            <el-table-column label="处理人" width="100">
+              <template #default="{ row }">{{
+                row.ticket.servicerRealName || row.ticket.servicerName || '未分配'
+              }}</template>
+            </el-table-column>
+            <el-table-column label="创建时间" width="160">
+              <template #default="{ row }">{{
+                row.ticket.caseGmtCreate
+              }}</template>
+            </el-table-column>
+            <el-table-column label="回复留痕" width="90" align="center">
+              <template #default="{ row }">
+                <el-tag
+                  size="small"
+                  :type="(row.ticket.replies || []).length ? 'success' : 'info'"
+                  >{{ (row.ticket.replies || []).length }} 条</el-tag
+                >
+              </template>
+            </el-table-column>
+          </el-table>
         </section>
 
         <section class="timeline-section">
@@ -576,6 +643,27 @@ onMounted(() => {
   margin: 0 0 12px;
   font-size: 15px;
   font-weight: 600;
+}
+
+.section-sub {
+  margin-left: 8px;
+  font-size: 12px;
+  font-weight: 400;
+  color: $text-muted;
+}
+
+.ticket-section {
+  margin-bottom: 18px;
+}
+
+.ticket-title {
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.ticket-sub {
+  font-size: 11px;
+  color: $text-muted;
 }
 
 .timeline {

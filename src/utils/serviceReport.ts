@@ -6,6 +6,7 @@ import type {
   EvidenceCheck,
   ReportEvent,
   ReportMetric,
+  ReportTicket,
   ServiceReport,
 } from '@/types/report'
 
@@ -68,13 +69,47 @@ export function generateServiceReport(params: {
   alsNo: string
   emails: EmailMessage[]
   compensations: CompensationRecord[]
+  /** 全量工单，内部按订单号 + 客户身份（会员名/会员ID/邮箱）筛选 */
   tickets: TicketItem[]
 }): ServiceReport | null {
   const alsNo = normalizeAlsNo(params.alsNo)
   const order = queryLogisticsOrder(alsNo)
   if (!order) return null
 
-  const { emails, compensations, tickets } = params
+  const { emails, compensations } = params
+  const orderTickets = params.tickets.filter((t) => t.orderNo === alsNo)
+
+  // 客户身份集合：本单工单 + 邮件 + 赔付中的客户标识，用于跨单聚合客户历史工单
+  const identity = new Set<string>()
+  const addId = (v?: string | null) => {
+    if (v && v.trim()) identity.add(v.trim().toLowerCase())
+  }
+  for (const t of orderTickets) {
+    addId(t.memberName)
+    addId(t.memberId)
+    addId(t.fromEmail)
+  }
+  for (const m of emails) {
+    addId(m.customerEmail)
+    addId(m.customerName)
+  }
+  for (const c of compensations) addId(c.customerName)
+  const otherTickets = params.tickets.filter(
+    (t) =>
+      t.orderNo !== alsNo &&
+      [t.memberName, t.memberId, t.fromEmail].some(
+        (v) => v && identity.has(v.trim().toLowerCase()),
+      ),
+  )
+  const tickets = [...orderTickets, ...otherTickets]
+  const reportTickets: ReportTicket[] = [
+    ...orderTickets.map((ticket) => ({ ticket, relation: '本单工单' as const })),
+    ...otherTickets.map((ticket) => ({
+      ticket,
+      relation: '客户其他工单' as const,
+    })),
+  ]
+
   const events: ReportEvent[] = []
 
   for (const t of order.tracks) {
@@ -118,11 +153,12 @@ export function generateServiceReport(params: {
     })
   }
   for (const t of tickets) {
+    const isOrderTicket = t.orderNo === alsNo
     events.push({
       time: normalizeTime(t.caseGmtCreate),
       source: '工单',
-      title: `工单创建 · ${t.taskTypeName || t.templateName || t.caseId}`,
-      detail: `${t.emailTitle || t.questionInfo}\n工单状态：${t.caseStatus}；任务状态：${t.taskStatus}`,
+      title: `${isOrderTicket ? '工单创建' : '客户历史工单'} · ${t.taskTypeName || t.templateName || t.caseId}`,
+      detail: `${t.emailTitle || t.questionInfo}\n工单状态：${t.caseStatus}；任务状态：${t.taskStatus}${isOrderTicket ? '' : `\n关联订单：${t.orderNo || '—'}（同客户举证）`}`,
       actor: t.servicerRealName || t.servicerName,
     })
     for (const r of t.replies || []) {
@@ -149,7 +185,10 @@ export function generateServiceReport(params: {
     0,
   )
   const customerName =
-    emails[0]?.customerName || compensations[0]?.customerName || '客户'
+    emails[0]?.customerName ||
+    compensations[0]?.customerName ||
+    orderTickets[0]?.memberName ||
+    '客户'
 
   const corpus = [
     ...emails.map((m) => `${m.subject} ${m.body}`),
@@ -230,9 +269,13 @@ export function generateServiceReport(params: {
     const ticketReplies = tickets.flatMap((t) => t.replies || [])
     const phoneCount = ticketReplies.filter((r) => r.channel === 'phone').length
     analysis.push(
-      `关联工单 ${tickets.length} 个（${tickets.map((t) => t.caseId).join('、')}），当前状态：${Array.from(new Set(tickets.map((t) => t.caseStatus))).join('、')}，处理人：${Array.from(new Set(tickets.map((t) => t.servicerRealName || t.servicerName))).join('、')}。${
+      `关联工单 ${tickets.length} 个（${tickets.map((t) => t.caseId).join('、')}），当前状态：${Array.from(new Set(tickets.map((t) => t.caseStatus))).join('、')}，处理人：${Array.from(new Set(tickets.map((t) => t.servicerRealName || t.servicerName || '未分配'))).join('、')}。${
         ticketReplies.length
           ? `工单回复留痕 ${ticketReplies.length} 条（电话沟通 ${phoneCount} / 邮件回复 ${ticketReplies.length - phoneCount}）。`
+          : ''
+      }${
+        otherTickets.length
+          ? `另按客户身份（会员名/邮箱）匹配到该客户其他订单工单 ${otherTickets.length} 个（${otherTickets.map((t) => `${t.caseId}·${t.orderNo || '无单号'}`).join('、')}），可作为客户历史服务记录的补充举证。`
           : ''
       }`,
     )
@@ -253,6 +296,15 @@ export function generateServiceReport(params: {
       label: '客户沟通凭证',
       ok: emails.length > 0 || tickets.length > 0,
       detail: `邮件 ${emails.length} 封 / 工单 ${tickets.length} 个`,
+    },
+    {
+      label: '客户工单举证',
+      ok: orderTickets.length > 0,
+      detail: orderTickets.length
+        ? `本单工单 ${orderTickets.length} 个${otherTickets.length ? `，另有同客户其他工单 ${otherTickets.length} 个` : ''}`
+        : otherTickets.length
+          ? `本单无工单，仅同客户其他工单 ${otherTickets.length} 个`
+          : '该客户暂无工单记录',
     },
     {
       label: '邮件回复闭环',
@@ -285,7 +337,7 @@ export function generateServiceReport(params: {
     risks.push('缺少邮件沟通凭证，举证材料完整性受限。')
 
   const conclusion = [
-    `截至 ${nowStamp()}，订单 ${alsNo}（${order.courier} · ${order.trackingNo}）在八达通客服系统内共留存 ${events.length} 条可追溯服务动作，覆盖物流轨迹、内部操作日志、客户邮件往来${compensations.length ? '、赔付登记' : ''}${tickets.length ? '、工单处理' : ''}，时间跨度 ${span}。`,
+    `截至 ${nowStamp()}，订单 ${alsNo}（${order.courier} · ${order.trackingNo}）在八达通客服系统内共留存 ${events.length} 条可追溯服务动作，覆盖物流轨迹、内部操作日志、客户邮件往来${compensations.length ? '、赔付登记' : ''}${tickets.length ? `、客户工单 ${tickets.length} 个（含同客户其他订单工单 ${otherTickets.length} 个）` : ''}，时间跨度 ${span}。`,
     unreplied.length
       ? `其中 ${unreplied.length} 封客户收件尚未回复，服务闭环存在缺口，已在风险提示中标注。`
       : '客户诉求均有对应回复与处理记录，服务链路完整闭环。',
@@ -304,6 +356,7 @@ export function generateServiceReport(params: {
     evidenceChecks,
     conclusion,
     risks,
+    tickets: reportTickets,
   }
 }
 
@@ -314,6 +367,10 @@ function stamp() {
 }
 
 export function exportServiceReportMarkdown(report: ServiceReport) {
+  const nums = ['一', '二', '三', '四', '五', '六', '七', '八']
+  let si = 0
+  const sec = (title: string) => `## ${nums[si++]}、${title}`
+  const reportTickets = report.tickets || []
   const lines: string[] = [
     `# 订单服务报告（平台举证） · ${report.alsNo}`,
     '',
@@ -325,7 +382,7 @@ export function exportServiceReportMarkdown(report: ServiceReport) {
     `- 当前状态：${report.order.status}`,
     `- 轨迹查询：${report.order.trackUrl}`,
     '',
-    '## 一、服务指标',
+    sec('服务指标'),
     '',
     '| 指标 | 数值 | 说明 |',
     '| --- | --- | --- |',
@@ -333,26 +390,47 @@ export function exportServiceReportMarkdown(report: ServiceReport) {
       (m) => `| ${m.label} | ${m.value} | ${m.hint || ''} |`,
     ),
     '',
-    '## 二、AI 分析',
+    sec('AI 分析'),
     '',
     ...(report.issues.length
       ? [`**识别问题类型：** ${report.issues.join('、')}`, '']
       : []),
     ...report.analysis.flatMap((p) => [p, '']),
-    '## 三、举证完整性核查',
+    sec('举证完整性核查'),
     '',
     ...report.evidenceChecks.map(
       (c) => `- [${c.ok ? 'x' : ' '}] ${c.label}：${c.detail}`,
     ),
     '',
-    '## 四、举证结论',
+    sec(`客户工单举证（${reportTickets.length}）`),
+    '',
+    ...(reportTickets.length
+      ? [
+          '| 关联 | 工单号 | 主题/问题 | 关联订单 | 工单状态 | 处理人 | 创建时间 | 回复留痕 |',
+          '| --- | --- | --- | --- | --- | --- | --- | --- |',
+          ...reportTickets.map(({ ticket: t, relation }) =>
+            `| ${[
+              relation,
+              t.caseId,
+              t.emailTitle || t.questionInfo || '—',
+              t.orderNo || '—',
+              t.caseStatus,
+              t.servicerRealName || t.servicerName || '未分配',
+              t.caseGmtCreate,
+              `${(t.replies || []).length} 条`,
+            ].join(' | ')} |`,
+          ),
+          '',
+        ]
+      : ['该客户暂无工单记录。', '']),
+    sec('举证结论'),
     '',
     report.conclusion,
     '',
     ...(report.risks.length
-      ? ['## 五、风险提示', '', ...report.risks.map((r) => `- ${r}`), '']
+      ? [sec('风险提示'), '', ...report.risks.map((r) => `- ${r}`), '']
       : []),
-    `## ${report.risks.length ? '六' : '五'}、完整服务时间线（${report.events.length} 条）`,
+    sec(`完整服务时间线（${report.events.length} 条）`),
     '',
     '| 时间 | 来源 | 动作 | 操作方 | 详情 |',
     '| --- | --- | --- | --- | --- |',
